@@ -27,31 +27,26 @@ jobs:
 
       - name: Install tools (dex2jar + apktool)
         run: |
-          # dex2jar for class extraction
           wget -q https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
           unzip -q dex-tools-v2.4.zip
           chmod +x dex-tools-v2.4/d2j-dex2jar.sh
 
-          # apktool for resource extraction
           wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-          echo '#!/bin/bash' > apktool
-          echo 'java -jar '"$PWD/apktool.jar"' "$@"' >> apktool
-          chmod +x apktool
-          echo "$PWD" >> $GITHUB_PATH
+          echo '#!/bin/bash' > apktool && echo 'java -jar '"$PWD/apktool.jar"' "$@"' >> apktool
+          chmod +x apktool && echo "$PWD" >> $GITHUB_PATH
 
       - name: Decompile APK with apktool (resources)
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           apktool d "$APK_FILE" -o apk_decoded --force-all 2>&1 | tail -5
-          echo "=== Decoded APK structure ==="
-          ls apk_decoded/
+          echo "=== Decoded APK res folders ==="
+          ls apk_decoded/res/
 
       - name: Extract classes from APK with dex2jar
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           mkdir -p app/libs app/src/main/jniLibs
 
-          # Extract raw APK for dex files and native libs
           mkdir -p apk_raw
           unzip -q "$APK_FILE" -d apk_raw
 
@@ -68,16 +63,10 @@ jobs:
 
           cd /tmp/merged_classes
 
-          # Remove all Maven-resolvable packages to avoid duplicate class errors
-          rm -rf android/ androidx/
-          rm -rf com/google/
-          rm -rf kotlin/ kotlinx/
-          rm -rf org/intellij/ org/jetbrains/
-          rm -rf com/afollestad/
-          rm -rf com/tbuonomo/
-          rm -rf org/osmdroid/
-          rm -rf org/metalev/
-          rm -rf META-INF/
+          # Remove all Maven-resolvable packages
+          rm -rf android/ androidx/ com/google/ kotlin/ kotlinx/
+          rm -rf org/intellij/ org/jetbrains/ com/afollestad/ com/tbuonomo/
+          rm -rf org/osmdroid/ org/metalev/ META-INF/
 
           echo "=== Remaining custom packages ==="
           find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2}' | sort -u | head -30
@@ -85,7 +74,7 @@ jobs:
           MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
           jar cf "$MERGED_JAR" . 2>/dev/null || true
           cd -
-          echo "Custom JAR size: $(ls -lh app/libs/all-deps.jar | awk '{print $5}')"
+          echo "Custom JAR: $(ls -lh app/libs/all-deps.jar | awk '{print $5}')"
 
           # Copy native .so libraries
           if [ -d "apk_raw/lib" ]; then
@@ -94,27 +83,30 @@ jobs:
               mkdir -p "app/src/main/jniLibs/$abi"
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
-            echo "=== Native libs ==="
             find app/src/main/jniLibs -name "*.so"
           fi
 
-      - name: Copy resources from decoded APK
+      - name: Copy ONLY mipmap resources from decoded APK
         run: |
-          # Copy res folder from apktool output to app/src/main/res
-          # This replaces the placeholder res files with actual APK resources
-          if [ -d "apk_decoded/res" ]; then
-            echo "Merging APK resources into app/src/main/res..."
-            cp -rn apk_decoded/res/. app/src/main/res/ 2>/dev/null || true
-            echo "=== Mipmap folders ==="
-            ls app/src/main/res/ | grep mipmap || echo "No mipmap found!"
-            ls app/src/main/res/mipmap-hdpi/ 2>/dev/null | head -5 || true
-          fi
+          # Only copy mipmap folders (icons) - project already has other res files
+          # Using apktool decoded resources which are proper PNG files
+          for mipmap_dir in apk_decoded/res/mipmap-*/; do
+            if [ -d "$mipmap_dir" ]; then
+              dir_name=$(basename "$mipmap_dir")
+              mkdir -p "app/src/main/res/$dir_name"
+              cp "$mipmap_dir"* "app/src/main/res/$dir_name/" 2>/dev/null || true
+              echo "Copied $dir_name: $(ls app/src/main/res/$dir_name | head -5)"
+            fi
+          done
 
           # Copy assets if any
           if [ -d "apk_decoded/assets" ]; then
             mkdir -p app/src/main/assets
             cp -rn apk_decoded/assets/. app/src/main/assets/ 2>/dev/null || true
           fi
+
+          echo "=== Mipmap folders in project ==="
+          ls app/src/main/res/ | grep mipmap
 
       - name: Update settings.gradle
         run: |
@@ -148,7 +140,6 @@ jobs:
               }
 
               buildFeatures { viewBinding true }
-
               kotlinOptions { jvmTarget = '1.8' }
 
               compileOptions {
@@ -178,10 +169,8 @@ jobs:
           }
 
           dependencies {
-              // Proprietary + JCenter-dead classes from APK DEX
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Standard Android (resolved via Google Maven)
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -196,7 +185,6 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
 
-              // Third-party via MavenCentral/JitPack (removed from jar)
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'com.afollestad.material-dialogs:core:3.3.0'
               implementation 'com.afollestad.material-dialogs:input:3.3.0'
