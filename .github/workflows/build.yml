@@ -60,33 +60,18 @@ jobs:
 
           cd /tmp/merged_classes
 
-          # Remove all Maven/JitPack-resolvable packages (to avoid duplicate classes)
-          # Standard Android platform + Google
+          # Remove Maven/JitPack-resolvable packages to avoid duplicate classes
           rm -rf android/ androidx/ com/google/ META-INF/
-
-          # Kotlin runtime (resolved via MavenCentral)
           rm -rf kotlin/ kotlinx/ org/intellij/ org/jetbrains/
+          rm -rf com/tbuonomo/ org/osmdroid/ org/metalev/
+          rm -rf com/afollestad/ com/othershe/ com/Othershe/
+          rm -rf com/github/ferfalk/ com/github/Ferfalk/
 
-          # MavenCentral-resolvable
-          rm -rf com/tbuonomo/           # dotsindicator
-          rm -rf org/osmdroid/ org/metalev/  # osmdroid
+          # KEEP: me/nukc (stateview - JitPack can't resolve v2.2.0)
+          # KEEP: cbfg/ (RVAdapter - gitee maven), com/roger/, com/imuxuan/
+          # KEEP: virtual/ (app code + camera lib), com/android/ (billing)
 
-          # JitPack-resolvable (classes AND attrs.xml provided by AAR)
-          rm -rf com/afollestad/          # material-dialogs
-          rm -rf com/othershe/            # CornerLabelView
-          rm -rf com/Othershe/
-          rm -rf com/github/ferfalk/      # SimpleSearchView
-          rm -rf com/github/Ferfalk/
-
-          # KEEP in jar (not resolvable via Maven/JitPack):
-          # - me/nukc/          stateview (JitPack can't resolve this version)
-          # - cbfg/             RVAdapter (gitee maven, uncertain)
-          # - com/roger/        catloadinglibrary (JCenter dead)
-          # - com/imuxuan/      floatingview (JCenter dead)
-          # - virtual/          app own code + camera lib
-          # - com/android/      billing, installreferrer
-
-          echo "=== Remaining classes in jar ==="
+          echo "=== Remaining packages in jar ==="
           find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2}' | sort -u
 
           MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
@@ -104,9 +89,8 @@ jobs:
             find app/src/main/jniLibs -name "*.so"
           fi
 
-      - name: Copy mipmap icons + create missing attrs
+      - name: Copy mipmap icons from decoded APK
         run: |
-          # Copy mipmap (icon) resources from APK
           for mipmap_dir in apk_decoded/res/mipmap-*/; do
             if [ -d "$mipmap_dir" ]; then
               dir_name=$(basename "$mipmap_dir")
@@ -116,39 +100,13 @@ jobs:
           done
           echo "Mipmaps: $(ls app/src/main/res/ | grep mipmap | tr '\n' ' ')"
 
-          # Copy assets
           if [ -d "apk_decoded/assets" ]; then
             mkdir -p app/src/main/assets
             cp -rn apk_decoded/assets/. app/src/main/assets/ 2>/dev/null || true
           fi
 
-          # Create attrs.xml for libs kept in jar (stateview, RVAdapter, catloading, floatingview)
-          # These attrs are not in the extracted jar but may be needed by layouts
-          mkdir -p app/src/main/res/values
-          if ! grep -q "cornerlabel\|stateview" app/src/main/res/values/attrs.xml 2>/dev/null; then
-            # Check if attrs.xml exists, if so append, else create
-            cat >> app/src/main/res/values/attrs.xml << 'ATTRS' 2>/dev/null || cat > app/src/main/res/values/attrs.xml << 'ATTRS'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <!-- StateView attrs (me.nukc.stateview kept in jar) -->
-              <attr name="sv_emptyImage" format="reference" />
-              <attr name="sv_emptyText" format="string" />
-              <attr name="sv_loadingImage" format="reference" />
-              <declare-styleable name="StateView">
-                  <attr name="sv_emptyImage" />
-                  <attr name="sv_emptyText" />
-                  <attr name="sv_loadingImage" />
-              </declare-styleable>
-          </resources>
-          ATTRS
-          fi
-
       - name: Update settings.gradle
-        run: |
-          cat > settings.gradle << 'GRADLE'
-          include ':app'
-          rootProject.name = "VCamera"
-          GRADLE
+        run: echo "include ':app'; rootProject.name = 'VCamera'" > settings.gradle
 
       - name: Update app/build.gradle
         run: |
@@ -176,18 +134,15 @@ jobs:
 
               buildFeatures { viewBinding true }
               kotlinOptions { jvmTarget = '1.8' }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
                   targetCompatibility JavaVersion.VERSION_1_8
               }
-
               lintOptions {
                   checkReleaseBuilds false
                   abortOnError false
                   disable 'UnusedResources', 'RestrictedApi'
               }
-
               packagingOptions {
                   pickFirst 'META-INF/**'
                   pickFirst 'kotlin/**'
@@ -204,11 +159,10 @@ jobs:
           }
 
           dependencies {
-              // Proprietary + JCenter-dead + unresolvable libs (kept as jar from APK DEX)
-              // Includes: stateview, catloadinglibrary, floatingview, RVAdapter, billing, virtual.camera.*
+              // Proprietary + JCenter-dead + unresolvable via Maven (from APK DEX)
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Standard Android (Google Maven)
+              // Google Maven
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -227,7 +181,7 @@ jobs:
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'org.osmdroid:osmdroid-android:6.1.11'
 
-              // JitPack (AAR with classes + res/attrs.xml)
+              // JitPack (provide classes + attrs.xml via AAR)
               implementation 'com.afollestad.material-dialogs:core:3.3.0'
               implementation 'com.afollestad.material-dialogs:input:3.3.0'
               implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
