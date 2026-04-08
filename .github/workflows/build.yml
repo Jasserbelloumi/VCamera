@@ -1,13 +1,14 @@
-name: Build APK
+name: Decompile APK and Build
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 jobs:
-  build:
+  decompile-and-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
@@ -19,29 +20,151 @@ jobs:
           java-version: '11'
           distribution: 'temurin'
 
-      - name: Setup Gradle 7.2
+      - name: Download jadx
+        run: |
+          wget -q https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip
+          unzip -q jadx-1.5.0.zip -d jadx
+          chmod +x jadx/bin/jadx
+
+      - name: Download apktool
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          echo '#!/bin/bash' > apktool
+          echo 'java -jar /home/runner/work/VCamera/VCamera/apktool.jar "$@"' >> apktool
+          chmod +x apktool
+
+      - name: Decompile APK with jadx
+        run: |
+          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
+          mkdir -p jadx_output
+          ./jadx/bin/jadx --deobf --show-bad-code -d jadx_output "$APK_FILE" || true
+          echo "jadx done, checking output..."
+          ls jadx_output/
+
+      - name: Extract APK contents with apktool
+        run: |
+          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
+          java -jar apktool.jar d "$APK_FILE" -o apktool_output -f || true
+          echo "apktool done"
+          ls apktool_output/ || true
+
+      - name: Show available packages in jadx output
+        run: |
+          echo "=== Packages found ==="
+          find jadx_output/sources -type d | head -40 || true
+
+      - name: Create opensdk module from decompiled code
+        run: |
+          mkdir -p opensdk/src/main/java
+          mkdir -p opensdk/src/main/jniLibs
+          
+          # Copy decompiled source - look for opensdk or virtual packages
+          if [ -d "jadx_output/sources" ]; then
+            # Copy all non-app packages (potential SDK code)
+            for pkg_dir in jadx_output/sources/*/; do
+              pkg=$(basename "$pkg_dir")
+              echo "Found package: $pkg"
+              if [[ "$pkg" != "virtual" ]] || [[ "$pkg" == "virtual" ]]; then
+                cp -r "$pkg_dir" "opensdk/src/main/java/" 2>/dev/null || true
+              fi
+            done
+            
+            # Remove the app-specific package from opensdk (keep only SDK parts)
+            rm -rf opensdk/src/main/java/virtual/camera/app 2>/dev/null || true
+          fi
+
+          # Copy native libraries from APK
+          if [ -d "apktool_output/lib" ]; then
+            echo "=== Native libraries found ==="
+            find apktool_output/lib -name "*.so" | head -20
+            for abi_dir in apktool_output/lib/*/; do
+              abi=$(basename "$abi_dir")
+              mkdir -p "opensdk/src/main/jniLibs/$abi"
+              cp "$abi_dir"*.so "opensdk/src/main/jniLibs/$abi/" 2>/dev/null || true
+            done
+          fi
+
+          echo "=== opensdk structure ==="
+          find opensdk -type f | head -30
+
+      - name: Create opensdk build.gradle
+        run: |
+          cat > opensdk/build.gradle << 'GRADLE'
+          apply plugin: 'com.android.library'
+          apply plugin: 'kotlin-android'
+
+          android {
+              compileSdkVersion rootProject.ext.compileSdkVersion
+
+              defaultConfig {
+                  minSdkVersion rootProject.ext.minSdkVersion
+                  targetSdkVersion rootProject.ext.targetSdkVersion
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+              
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+              
+              lintOptions {
+                  abortOnError false
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
+              implementation 'com.google.android.material:material:1.3.0'
+              implementation 'androidx.core:core-ktx:1.3.2'
+          }
+          GRADLE
+          echo "opensdk/build.gradle created"
+
+      - name: Create opensdk AndroidManifest
+        run: |
+          cat > opensdk/src/main/AndroidManifest.xml << 'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="virtual.camera.opensdk">
+          </manifest>
+          XML
+
+      - name: Setup Gradle wrapper
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '7.2'
+
+      - name: Create gradlew
+        run: |
+          gradle wrapper --gradle-version=7.2
+          chmod +x gradlew
 
       - name: Accept Android SDK licenses
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;31.0.0" "platforms;android-33" || true
 
-      - name: Create gradle wrapper
-        run: |
-          gradle wrapper --gradle-version=7.2
-          chmod +x gradlew
-
       - name: Build Debug APK
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-        run: ./gradlew assembleDebug --stacktrace
+        run: |
+          ./gradlew assembleDebug --stacktrace 2>&1 | tail -50
 
-      - name: Upload APK
+      - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            app/build/outputs/logs/
+            build/reports/
+          retention-days: 7
