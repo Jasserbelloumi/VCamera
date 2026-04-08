@@ -25,101 +25,58 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;31.0.0" "platforms;android-33" || true
 
-      - name: Download jadx
+      - name: Install dex2jar
         run: |
-          wget -q https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip
-          unzip -q jadx-1.5.0.zip -d jadx
-          chmod +x jadx/bin/jadx
+          wget -q https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
+          unzip -q dex-tools-v2.4.zip
+          chmod +x dex-tools-v2.4/d2j-dex2jar.sh
 
-      - name: Download apktool
-        run: |
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-
-      - name: Decompile APK with jadx
+      - name: Extract JAR and native libs from APK
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          mkdir -p jadx_output
-          ./jadx/bin/jadx --deobf --show-bad-code -d jadx_output "$APK_FILE" 2>&1 | tail -5 || true
-          echo "Packages found:"
-          find jadx_output/sources -maxdepth 2 -type d 2>/dev/null | head -20 || true
 
-      - name: Extract APK native libs with apktool
-        run: |
-          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          java -jar apktool.jar d "$APK_FILE" -o apktool_output -f 2>&1 | tail -5 || true
-          echo "Native libs found:"
-          find apktool_output/lib -name "*.so" 2>/dev/null | head -20 || true
+          # APK is a ZIP - extract it
+          mkdir -p apk_contents
+          unzip -q "$APK_FILE" -d apk_contents
 
-      - name: Build opensdk module from decompiled code
-        run: |
-          mkdir -p opensdk/src/main/java
-          mkdir -p opensdk/src/main/jniLibs
+          echo "=== APK contents ==="
+          ls apk_contents/
 
-          # Copy all decompiled sources except the main app package
-          if [ -d "jadx_output/sources" ]; then
-            find jadx_output/sources -mindepth 1 -maxdepth 1 -type d | while read pkg_dir; do
-              cp -r "$pkg_dir" "opensdk/src/main/java/" 2>/dev/null || true
-            done
-            # Remove app-specific code — keep only SDK parts
-            rm -rf opensdk/src/main/java/virtual/camera/app 2>/dev/null || true
+          # Convert dex to jar
+          mkdir -p app/libs
+          ./dex-tools-v2.4/d2j-dex2jar.sh apk_contents/classes.dex -o app/libs/opensdk.jar --force || true
+          
+          # Try other dex files if they exist
+          for dex in apk_contents/classes*.dex; do
+            name=$(basename $dex .dex)
+            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o "app/libs/${name}.jar" --force || true
+          done
+
+          echo "=== JARs created ==="
+          ls -la app/libs/
+
+          # Extract native .so files
+          mkdir -p app/src/main/jniLibs
+          if [ -d "apk_contents/lib" ]; then
+            cp -r apk_contents/lib/* app/src/main/jniLibs/ || true
+            echo "=== Native libs ==="
+            find app/src/main/jniLibs -name "*.so" | head -15
           fi
 
-          # Copy native .so libraries
-          if [ -d "apktool_output/lib" ]; then
-            for abi_dir in apktool_output/lib/*/; do
-              abi=$(basename "$abi_dir")
-              mkdir -p "opensdk/src/main/jniLibs/$abi"
-              cp "$abi_dir"*.so "opensdk/src/main/jniLibs/$abi/" 2>/dev/null || true
-            done
-          fi
-
-          echo "opensdk module contents:"
-          find opensdk -type f | head -30
-
-      - name: Create opensdk build.gradle
+      - name: Update settings.gradle to remove opensdk module
         run: |
-          cat > opensdk/build.gradle << 'GRADLE'
-          apply plugin: 'com.android.library'
-          apply plugin: 'kotlin-android'
-
-          android {
-              compileSdkVersion rootProject.ext.compileSdkVersion
-
-              defaultConfig {
-                  minSdkVersion rootProject.ext.minSdkVersion
-                  targetSdkVersion rootProject.ext.targetSdkVersion
-              }
-
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_1_8
-                  targetCompatibility JavaVersion.VERSION_1_8
-              }
-
-              kotlinOptions {
-                  jvmTarget = '1.8'
-              }
-
-              lintOptions {
-                  abortOnError false
-                  disable 'all'
-              }
-          }
-
-          dependencies {
-              implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
-              implementation 'com.google.android.material:material:1.3.0'
-              implementation 'androidx.core:core-ktx:1.3.2'
-          }
+          cat > settings.gradle << 'GRADLE'
+          include ':app'
+          rootProject.name = "VCamera"
           GRADLE
+          echo "settings.gradle updated - removed opensdk module"
 
-      - name: Create opensdk AndroidManifest
+      - name: Update app build.gradle to use jar libs instead of opensdk project
         run: |
-          cat > opensdk/src/main/AndroidManifest.xml << 'XML'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="virtual.camera.opensdk">
-          </manifest>
-          XML
+          # Replace 'implementation project(:opensdk)' with fileTree
+          sed -i "s|implementation project(':opensdk')|// implementation project(':opensdk') -- replaced with compiled jar|g" app/build.gradle
+          echo "app/build.gradle updated"
+          grep -n "opensdk" app/build.gradle || echo "opensdk reference removed"
 
       - name: Setup Gradle wrapper
         uses: gradle/actions/setup-gradle@v3
@@ -132,11 +89,9 @@ jobs:
           chmod +x gradlew
 
       - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug --stacktrace 2>&1 | tail -60
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
