@@ -41,8 +41,7 @@ jobs:
           echo "=== APK top-level ==="
           ls apk_contents/
 
-          # Convert ALL dex files to a single jar containing ALL classes
-          MERGED_JAR="app/libs/all-deps.jar"
+          # Convert ALL dex files to jars
           mkdir -p /tmp/merged_classes
 
           for dex in apk_contents/classes*.dex; do
@@ -50,21 +49,57 @@ jobs:
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
 
-          # Merge all jars into one
+          # Merge all jars into one temp directory
           for jar in /tmp/tmp_*.jar; do
             if [ -f "$jar" ]; then
               cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
             fi
           done
 
-          # Create merged jar
-          cd /tmp/merged_classes && jar cf "$OLDPWD/$MERGED_JAR" . 2>/dev/null || true && cd -
-          echo "Merged JAR size: $(ls -lh $MERGED_JAR | awk '{print $5}')"
+          # -------------------------------------------------------
+          # CRITICAL FIX: Remove standard Android library packages
+          # that are already declared as Maven dependencies.
+          # Keep ONLY proprietary/custom library classes.
+          # -------------------------------------------------------
+          cd /tmp/merged_classes
 
-          # Copy existing libs from APK (if any .jar or .aar)
-          if [ -d "apk_contents/kotlin" ]; then
-            echo "Kotlin classes found"
-          fi
+          # Remove AndroidX (all subpackages)
+          rm -rf android/ androidx/
+
+          # Remove Google libraries (Material, GMS, Guava, etc.)
+          rm -rf com/google/
+
+          # Remove Kotlin runtime and stdlib
+          rm -rf kotlin/ kotlinx/
+
+          # Remove third-party open-source libraries available via Maven
+          rm -rf com/afollestad/           # material-dialogs
+          rm -rf com/tbuonomo/             # dotsindicator
+          rm -rf com/roger/                # catloadinglibrary
+          rm -rf com/github/ferfalk/       # SimpleSearchView
+          rm -rf com/github/Ferfalk/
+          rm -rf com/imuxuan/              # floatingview
+          rm -rf com/gitee/                # RVAdapter
+          rm -rf org/osmdroid/             # osmdroid
+          rm -rf com/Othershe/             # CornerLabelView
+
+          # Remove other common open-source libs
+          rm -rf okhttp3/ okio/ retrofit2/ com/squareup/
+          rm -rf org/apache/ org/jetbrains/
+          rm -rf com/jakewharton/
+          rm -rf io/reactivex/
+
+          # Remove META-INF (causes packaging issues)
+          rm -rf META-INF/
+
+          echo "=== Remaining custom classes ==="
+          find . -name "*.class" | sed 's|./||' | cut -d/ -f1-3 | sort -u | head -30
+
+          # Create filtered proprietary jar (only custom/app-specific classes)
+          MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
+          jar cf "$MERGED_JAR" . 2>/dev/null || true
+          cd -
+          echo "Custom JAR size: $(ls -lh app/libs/all-deps.jar | awk '{print $5}')"
 
           # Copy native .so libraries
           if [ -d "apk_contents/lib" ]; then
@@ -74,7 +109,7 @@ jobs:
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
             echo "Native libs:"
-            find app/src/main/jniLibs -name "*.so" | head -10
+            find app/src/main/jniLibs -name "*.so" | head -20
           fi
 
       - name: Update settings.gradle
@@ -84,7 +119,7 @@ jobs:
           rootProject.name = "VCamera"
           GRADLE
 
-      - name: Update app/build.gradle - remove missing dependencies
+      - name: Update app/build.gradle
         run: |
           cat > app/build.gradle << 'GRADLE'
           plugins {
@@ -128,11 +163,13 @@ jobs:
               lintOptions {
                   checkReleaseBuilds false
                   abortOnError false
+                  disable 'UnusedResources', 'RestrictedApi'
               }
 
               packagingOptions {
                   pickFirst 'META-INF/**'
                   pickFirst 'kotlin/**'
+                  pickFirst '**/*.so'
               }
           }
 
@@ -141,10 +178,10 @@ jobs:
           }
 
           dependencies {
-              // All dependencies extracted from APK
+              // Custom proprietary classes extracted from APK (filtered, no duplicates)
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Android platform deps (not in APK)
+              // Standard Android dependencies (resolved via Maven, NOT in all-deps.jar)
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -158,6 +195,18 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
+
+              // Third-party open-source dependencies (resolved via Maven, NOT in all-deps.jar)
+              implementation 'com.tbuonomo:dotsindicator:4.2'
+              implementation 'com.afollestad.material-dialogs:core:3.3.0'
+              implementation 'com.afollestad.material-dialogs:input:3.3.0'
+              implementation 'com.github.nukc.stateview:kotlin:2.2.0'
+              implementation 'com.roger.catloadinglibrary:catloadinglibrary:1.0.9'
+              implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
+              implementation 'com.github.Othershe:CornerLabelView:1.0.0'
+              implementation 'org.osmdroid:osmdroid-android:6.1.11'
+              implementation 'com.gitee.cbfg5210:RVAdapter:0.3.7'
+              implementation 'com.imuxuan:floatingview:1.6'
           }
           GRADLE
           echo "app/build.gradle updated"
@@ -176,6 +225,7 @@ jobs:
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
