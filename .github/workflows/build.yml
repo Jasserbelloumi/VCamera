@@ -24,8 +24,10 @@ jobs:
         with:
           gradle-version: '7.2'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;31.0.0" "platforms;android-33" || true
 
       - name: Create gradle wrapper
         run: |
@@ -33,6 +35,8 @@ jobs:
           chmod +x gradlew
 
       - name: Build Debug APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
