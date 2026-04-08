@@ -57,45 +57,32 @@ jobs:
           done
 
           # -------------------------------------------------------
-          # CRITICAL FIX: Remove standard Android library packages
-          # that are already declared as Maven dependencies.
-          # Keep ONLY proprietary/custom library classes.
+          # TARGETED FIX: Remove ONLY packages that conflict with
+          # Maven-resolvable dependencies (AndroidX, Material, Kotlin).
+          # Keep all other classes (including JCenter-dead libs).
           # -------------------------------------------------------
           cd /tmp/merged_classes
 
-          # Remove AndroidX (all subpackages)
+          # Remove AndroidX (available via Google Maven)
           rm -rf android/ androidx/
 
-          # Remove Google libraries (Material, GMS, Guava, etc.)
-          rm -rf com/google/
+          # Remove Google Material (available via Google Maven)
+          rm -rf com/google/android/material/
 
-          # Remove Kotlin runtime and stdlib
+          # Remove Kotlin stdlib/runtime (available via MavenCentral)
           rm -rf kotlin/ kotlinx/
 
-          # Remove third-party open-source libraries available via Maven
-          rm -rf com/afollestad/           # material-dialogs
-          rm -rf com/tbuonomo/             # dotsindicator
-          rm -rf com/roger/                # catloadinglibrary
-          rm -rf com/github/ferfalk/       # SimpleSearchView
-          rm -rf com/github/Ferfalk/
-          rm -rf com/imuxuan/              # floatingview
-          rm -rf com/gitee/                # RVAdapter
-          rm -rf org/osmdroid/             # osmdroid
-          rm -rf com/Othershe/             # CornerLabelView
-
-          # Remove other common open-source libs
-          rm -rf okhttp3/ okio/ retrofit2/ com/squareup/
-          rm -rf org/apache/ org/jetbrains/
-          rm -rf com/jakewharton/
-          rm -rf io/reactivex/
+          # Remove com.google.android.gms (available via Google Maven)
+          rm -rf com/google/android/gms/
+          rm -rf com/google/android/datatransport/
 
           # Remove META-INF (causes packaging issues)
           rm -rf META-INF/
 
-          echo "=== Remaining custom classes ==="
-          find . -name "*.class" | sed 's|./||' | cut -d/ -f1-3 | sort -u | head -30
+          echo "=== Remaining custom classes (top-level packages) ==="
+          find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2"/"$3}' | sort -u | head -50
 
-          # Create filtered proprietary jar (only custom/app-specific classes)
+          # Create filtered jar
           MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
           jar cf "$MERGED_JAR" . 2>/dev/null || true
           cd -
@@ -108,8 +95,8 @@ jobs:
               mkdir -p "app/src/main/jniLibs/$abi"
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
-            echo "Native libs:"
-            find app/src/main/jniLibs -name "*.so" | head -20
+            echo "=== Native libs ==="
+            find app/src/main/jniLibs -name "*.so"
           fi
 
       - name: Update settings.gradle
@@ -139,21 +126,15 @@ jobs:
               }
 
               buildTypes {
-                  debug {
-                      minifyEnabled false
-                  }
-                  release {
-                      minifyEnabled false
-                  }
+                  debug { minifyEnabled false }
+                  release { minifyEnabled false }
               }
 
               buildFeatures {
                   viewBinding true
               }
 
-              kotlinOptions {
-                  jvmTarget = '1.8'
-              }
+              kotlinOptions { jvmTarget = '1.8' }
 
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
@@ -173,15 +154,20 @@ jobs:
               }
           }
 
+          // Explicit repositories (override dead jcenter)
           repositories {
               flatDir { dirs 'libs' }
+              google()
+              mavenCentral()
+              maven { url 'https://jitpack.io' }
+              maven { url "https://raw.githubusercontent.com/andvipgroup/CameraLib/master" }
           }
 
           dependencies {
-              // Custom proprietary classes extracted from APK (filtered, no duplicates)
+              // Custom classes from APK (proprietary + JCenter-dead libs kept in jar)
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Standard Android dependencies (resolved via Maven, NOT in all-deps.jar)
+              // Standard Android deps - REMOVED from jar, resolved via Google Maven
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -196,17 +182,14 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
 
-              // Third-party open-source dependencies (resolved via Maven, NOT in all-deps.jar)
+              // Third-party deps available via MavenCentral/JitPack (REMOVED from jar)
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'com.afollestad.material-dialogs:core:3.3.0'
               implementation 'com.afollestad.material-dialogs:input:3.3.0'
-              implementation 'com.github.nukc.stateview:kotlin:2.2.0'
-              implementation 'com.roger.catloadinglibrary:catloadinglibrary:1.0.9'
-              implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
-              implementation 'com.github.Othershe:CornerLabelView:1.0.0'
               implementation 'org.osmdroid:osmdroid-android:6.1.11'
-              implementation 'com.gitee.cbfg5210:RVAdapter:0.3.7'
-              implementation 'com.imuxuan:floatingview:1.6'
+
+              // NOTE: catloadinglibrary, floatingview, stateview, SimpleSearchView,
+              // CornerLabelView, RVAdapter are kept in all-deps.jar (JCenter dead or gitee)
           }
           GRADLE
           echo "app/build.gradle updated"
