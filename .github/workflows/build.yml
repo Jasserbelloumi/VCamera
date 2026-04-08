@@ -25,24 +25,39 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;31.0.0" "platforms;android-33" || true
 
-      - name: Install dex2jar
+      - name: Install tools (dex2jar + apktool)
         run: |
+          # dex2jar for class extraction
           wget -q https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
           unzip -q dex-tools-v2.4.zip
           chmod +x dex-tools-v2.4/d2j-dex2jar.sh
 
-      - name: Extract everything from APK
+          # apktool for resource extraction
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          echo '#!/bin/bash' > apktool
+          echo 'java -jar '"$PWD/apktool.jar"' "$@"' >> apktool
+          chmod +x apktool
+          echo "$PWD" >> $GITHUB_PATH
+
+      - name: Decompile APK with apktool (resources)
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          mkdir -p apk_contents app/libs app/src/main/jniLibs
+          apktool d "$APK_FILE" -o apk_decoded --force-all 2>&1 | tail -5
+          echo "=== Decoded APK structure ==="
+          ls apk_decoded/
 
-          unzip -q "$APK_FILE" -d apk_contents
-          echo "=== APK top-level ==="
-          ls apk_contents/
+      - name: Extract classes from APK with dex2jar
+        run: |
+          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
+          mkdir -p app/libs app/src/main/jniLibs
+
+          # Extract raw APK for dex files and native libs
+          mkdir -p apk_raw
+          unzip -q "$APK_FILE" -d apk_raw
 
           mkdir -p /tmp/merged_classes
 
-          for dex in apk_contents/classes*.dex; do
+          for dex in apk_raw/classes*.dex; do
             echo "Converting: $dex"
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
@@ -53,38 +68,19 @@ jobs:
 
           cd /tmp/merged_classes
 
-          # === COMPREHENSIVE REMOVAL OF ALL MAVEN-RESOLVABLE PACKAGES ===
-
-          # Android platform classes
+          # Remove all Maven-resolvable packages to avoid duplicate class errors
           rm -rf android/ androidx/
-
-          # Google libraries
           rm -rf com/google/
-
-          # Kotlin stdlib/runtime/coroutines
           rm -rf kotlin/ kotlinx/
-
-          # JetBrains annotations (pulled transitively by Kotlin)
           rm -rf org/intellij/ org/jetbrains/
-
-          # afollestad material-dialogs (JitPack - resolvable)
           rm -rf com/afollestad/
-
-          # dotsindicator (MavenCentral - resolvable)
           rm -rf com/tbuonomo/
-
-          # osmdroid (MavenCentral - resolvable)
           rm -rf org/osmdroid/
-
-          # metalev/multilevelpush (dependency of osmdroid or similar)
           rm -rf org/metalev/
-
-          # Remove META-INF (causes packaging conflicts)
           rm -rf META-INF/
 
-          echo "=== Remaining custom packages in jar ==="
-          find . -name "*.class" -not -path "*/R.class" -not -path "*/R\$*.class" \
-            | sed 's|./||' | awk -F/ '{print $1"/"$2"/"$3}' | sort -u | head -60
+          echo "=== Remaining custom packages ==="
+          find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2}' | sort -u | head -30
 
           MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
           jar cf "$MERGED_JAR" . 2>/dev/null || true
@@ -92,14 +88,32 @@ jobs:
           echo "Custom JAR size: $(ls -lh app/libs/all-deps.jar | awk '{print $5}')"
 
           # Copy native .so libraries
-          if [ -d "apk_contents/lib" ]; then
-            for abi_dir in apk_contents/lib/*/; do
+          if [ -d "apk_raw/lib" ]; then
+            for abi_dir in apk_raw/lib/*/; do
               abi=$(basename "$abi_dir")
               mkdir -p "app/src/main/jniLibs/$abi"
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
             echo "=== Native libs ==="
             find app/src/main/jniLibs -name "*.so"
+          fi
+
+      - name: Copy resources from decoded APK
+        run: |
+          # Copy res folder from apktool output to app/src/main/res
+          # This replaces the placeholder res files with actual APK resources
+          if [ -d "apk_decoded/res" ]; then
+            echo "Merging APK resources into app/src/main/res..."
+            cp -rn apk_decoded/res/. app/src/main/res/ 2>/dev/null || true
+            echo "=== Mipmap folders ==="
+            ls app/src/main/res/ | grep mipmap || echo "No mipmap found!"
+            ls app/src/main/res/mipmap-hdpi/ 2>/dev/null | head -5 || true
+          fi
+
+          # Copy assets if any
+          if [ -d "apk_decoded/assets" ]; then
+            mkdir -p app/src/main/assets
+            cp -rn apk_decoded/assets/. app/src/main/assets/ 2>/dev/null || true
           fi
 
       - name: Update settings.gradle
@@ -164,12 +178,10 @@ jobs:
           }
 
           dependencies {
-              // Proprietary and JCenter-dead library classes extracted from APK DEX
-              // (catloadinglibrary, floatingview, stateview, SimpleSearchView,
-              //  CornerLabelView, RVAdapter, billing, etc. all bundled here)
+              // Proprietary + JCenter-dead classes from APK DEX
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Standard Android dependencies (resolved via Google Maven)
+              // Standard Android (resolved via Google Maven)
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -184,8 +196,7 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
 
-              // Third-party deps resolved via MavenCentral / JitPack
-              // (afollestad, tbuonomo, osmdroid REMOVED from jar above)
+              // Third-party via MavenCentral/JitPack (removed from jar)
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'com.afollestad.material-dialogs:core:3.3.0'
               implementation 'com.afollestad.material-dialogs:input:3.3.0'
