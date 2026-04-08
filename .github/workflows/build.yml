@@ -31,52 +31,136 @@ jobs:
           unzip -q dex-tools-v2.4.zip
           chmod +x dex-tools-v2.4/d2j-dex2jar.sh
 
-      - name: Extract JAR and native libs from APK
+      - name: Extract everything from APK
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
+          mkdir -p apk_contents app/libs app/src/main/jniLibs
 
-          # APK is a ZIP - extract it
-          mkdir -p apk_contents
+          # Extract APK
           unzip -q "$APK_FILE" -d apk_contents
-
-          echo "=== APK contents ==="
+          echo "=== APK top-level ==="
           ls apk_contents/
 
-          # Convert dex to jar
-          mkdir -p app/libs
-          ./dex-tools-v2.4/d2j-dex2jar.sh apk_contents/classes.dex -o app/libs/opensdk.jar --force || true
-          
-          # Try other dex files if they exist
+          # Convert ALL dex files to a single jar containing ALL classes
+          MERGED_JAR="app/libs/all-deps.jar"
+          mkdir -p /tmp/merged_classes
+
           for dex in apk_contents/classes*.dex; do
-            name=$(basename $dex .dex)
-            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o "app/libs/${name}.jar" --force || true
+            echo "Converting: $dex"
+            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
 
-          echo "=== JARs created ==="
-          ls -la app/libs/
+          # Merge all jars into one
+          for jar in /tmp/tmp_*.jar; do
+            if [ -f "$jar" ]; then
+              cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
+            fi
+          done
 
-          # Extract native .so files
-          mkdir -p app/src/main/jniLibs
-          if [ -d "apk_contents/lib" ]; then
-            cp -r apk_contents/lib/* app/src/main/jniLibs/ || true
-            echo "=== Native libs ==="
-            find app/src/main/jniLibs -name "*.so" | head -15
+          # Create merged jar
+          cd /tmp/merged_classes && jar cf "$OLDPWD/$MERGED_JAR" . 2>/dev/null || true && cd -
+          echo "Merged JAR size: $(ls -lh $MERGED_JAR | awk '{print $5}')"
+
+          # Copy existing libs from APK (if any .jar or .aar)
+          if [ -d "apk_contents/kotlin" ]; then
+            echo "Kotlin classes found"
           fi
 
-      - name: Update settings.gradle to remove opensdk module
+          # Copy native .so libraries
+          if [ -d "apk_contents/lib" ]; then
+            for abi_dir in apk_contents/lib/*/; do
+              abi=$(basename "$abi_dir")
+              mkdir -p "app/src/main/jniLibs/$abi"
+              cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
+            done
+            echo "Native libs:"
+            find app/src/main/jniLibs -name "*.so" | head -10
+          fi
+
+      - name: Update settings.gradle
         run: |
           cat > settings.gradle << 'GRADLE'
           include ':app'
           rootProject.name = "VCamera"
           GRADLE
-          echo "settings.gradle updated - removed opensdk module"
 
-      - name: Update app build.gradle to use jar libs instead of opensdk project
+      - name: Update app/build.gradle - remove missing dependencies
         run: |
-          # Replace 'implementation project(:opensdk)' with fileTree
-          sed -i "s|implementation project(':opensdk')|// implementation project(':opensdk') -- replaced with compiled jar|g" app/build.gradle
+          cat > app/build.gradle << 'GRADLE'
+          plugins {
+              id 'com.android.application'
+              id 'kotlin-android'
+          }
+
+          android {
+              compileSdk rootProject.ext.compileSdkVersion
+
+              defaultConfig {
+                  applicationId rootProject.ext.masterPkg
+                  minSdkVersion rootProject.ext.minSdkVersion
+                  targetSdkVersion rootProject.ext.targetSdkVersion
+                  versionCode rootProject.ext.versionCode
+                  versionName rootProject.ext.versionName
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              buildFeatures {
+                  viewBinding true
+              }
+
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+
+              lintOptions {
+                  checkReleaseBuilds false
+                  abortOnError false
+              }
+
+              packagingOptions {
+                  pickFirst 'META-INF/**'
+                  pickFirst 'kotlin/**'
+              }
+          }
+
+          repositories {
+              flatDir { dirs 'libs' }
+          }
+
+          dependencies {
+              // All dependencies extracted from APK
+              implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
+
+              // Android platform deps (not in APK)
+              implementation 'com.google.android.material:material:1.3.0'
+              implementation 'androidx.core:core-ktx:1.3.2'
+              implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
+              implementation 'androidx.constraintlayout:constraintlayout:2.0.4'
+              implementation "androidx.recyclerview:recyclerview:1.2.0"
+              implementation 'androidx.viewpager2:viewpager2:1.0.0'
+              implementation "androidx.activity:activity-ktx:1.2.2"
+              implementation "androidx.fragment:fragment-ktx:1.3.3"
+              implementation "androidx.preference:preference-ktx:1.1.1"
+              implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.4.2"
+              implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.3.1"
+              implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
+              implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
+          }
+          GRADLE
           echo "app/build.gradle updated"
-          grep -n "opensdk" app/build.gradle || echo "opensdk reference removed"
 
       - name: Setup Gradle wrapper
         uses: gradle/actions/setup-gradle@v3
