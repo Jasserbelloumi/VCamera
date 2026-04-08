@@ -36,12 +36,10 @@ jobs:
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           mkdir -p apk_contents app/libs app/src/main/jniLibs
 
-          # Extract APK
           unzip -q "$APK_FILE" -d apk_contents
           echo "=== APK top-level ==="
           ls apk_contents/
 
-          # Convert ALL dex files to jars
           mkdir -p /tmp/merged_classes
 
           for dex in apk_contents/classes*.dex; do
@@ -49,40 +47,45 @@ jobs:
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
 
-          # Merge all jars into one temp directory
           for jar in /tmp/tmp_*.jar; do
-            if [ -f "$jar" ]; then
-              cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
-            fi
+            [ -f "$jar" ] && cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
           done
 
-          # -------------------------------------------------------
-          # TARGETED FIX: Remove ONLY packages that conflict with
-          # Maven-resolvable dependencies (AndroidX, Material, Kotlin).
-          # Keep all other classes (including JCenter-dead libs).
-          # -------------------------------------------------------
           cd /tmp/merged_classes
 
-          # Remove AndroidX (available via Google Maven)
+          # === COMPREHENSIVE REMOVAL OF ALL MAVEN-RESOLVABLE PACKAGES ===
+
+          # Android platform classes
           rm -rf android/ androidx/
 
-          # Remove Google Material (available via Google Maven)
-          rm -rf com/google/android/material/
+          # Google libraries
+          rm -rf com/google/
 
-          # Remove Kotlin stdlib/runtime (available via MavenCentral)
+          # Kotlin stdlib/runtime/coroutines
           rm -rf kotlin/ kotlinx/
 
-          # Remove com.google.android.gms (available via Google Maven)
-          rm -rf com/google/android/gms/
-          rm -rf com/google/android/datatransport/
+          # JetBrains annotations (pulled transitively by Kotlin)
+          rm -rf org/intellij/ org/jetbrains/
 
-          # Remove META-INF (causes packaging issues)
+          # afollestad material-dialogs (JitPack - resolvable)
+          rm -rf com/afollestad/
+
+          # dotsindicator (MavenCentral - resolvable)
+          rm -rf com/tbuonomo/
+
+          # osmdroid (MavenCentral - resolvable)
+          rm -rf org/osmdroid/
+
+          # metalev/multilevelpush (dependency of osmdroid or similar)
+          rm -rf org/metalev/
+
+          # Remove META-INF (causes packaging conflicts)
           rm -rf META-INF/
 
-          echo "=== Remaining custom classes (top-level packages) ==="
-          find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2"/"$3}' | sort -u | head -50
+          echo "=== Remaining custom packages in jar ==="
+          find . -name "*.class" -not -path "*/R.class" -not -path "*/R\$*.class" \
+            | sed 's|./||' | awk -F/ '{print $1"/"$2"/"$3}' | sort -u | head -60
 
-          # Create filtered jar
           MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
           jar cf "$MERGED_JAR" . 2>/dev/null || true
           cd -
@@ -130,9 +133,7 @@ jobs:
                   release { minifyEnabled false }
               }
 
-              buildFeatures {
-                  viewBinding true
-              }
+              buildFeatures { viewBinding true }
 
               kotlinOptions { jvmTarget = '1.8' }
 
@@ -154,7 +155,6 @@ jobs:
               }
           }
 
-          // Explicit repositories (override dead jcenter)
           repositories {
               flatDir { dirs 'libs' }
               google()
@@ -164,10 +164,12 @@ jobs:
           }
 
           dependencies {
-              // Custom classes from APK (proprietary + JCenter-dead libs kept in jar)
+              // Proprietary and JCenter-dead library classes extracted from APK DEX
+              // (catloadinglibrary, floatingview, stateview, SimpleSearchView,
+              //  CornerLabelView, RVAdapter, billing, etc. all bundled here)
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Standard Android deps - REMOVED from jar, resolved via Google Maven
+              // Standard Android dependencies (resolved via Google Maven)
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -182,14 +184,12 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
 
-              // Third-party deps available via MavenCentral/JitPack (REMOVED from jar)
+              // Third-party deps resolved via MavenCentral / JitPack
+              // (afollestad, tbuonomo, osmdroid REMOVED from jar above)
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'com.afollestad.material-dialogs:core:3.3.0'
               implementation 'com.afollestad.material-dialogs:input:3.3.0'
               implementation 'org.osmdroid:osmdroid-android:6.1.11'
-
-              // NOTE: catloadinglibrary, floatingview, stateview, SimpleSearchView,
-              // CornerLabelView, RVAdapter are kept in all-deps.jar (JCenter dead or gitee)
           }
           GRADLE
           echo "app/build.gradle updated"
