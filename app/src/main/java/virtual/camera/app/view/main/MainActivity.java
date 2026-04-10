@@ -28,14 +28,11 @@ public class MainActivity extends AppCompatActivity {
         }
 
         try {
-            View toolbarLayout = findViewById(R.id.toolbar_layout);
-            if (toolbarLayout != null) {
-                Toolbar toolbar = toolbarLayout.findViewById(R.id.toolbar);
-                if (toolbar != null) {
-                    setSupportActionBar(toolbar);
-                    if (getSupportActionBar() != null) {
-                        getSupportActionBar().setTitle(R.string.app_name);
-                    }
+            Toolbar toolbar = findViewById(R.id.toolbar);
+            if (toolbar != null) {
+                setSupportActionBar(toolbar);
+                if (getSupportActionBar() != null) {
+                    getSupportActionBar().setTitle(R.string.app_name);
                 }
             }
         } catch (Exception e) {
