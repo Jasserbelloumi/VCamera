@@ -2,61 +2,60 @@ package virtual.camera.camera;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import virtual.camera.app.app.App;
+import android.util.Log;
 
 public class MultiPreferences {
-    private static final String PREFS_NAME = "vcamera_prefs";
     private static MultiPreferences instance;
-    private final SharedPreferences prefs;
+    private SharedPreferences prefs;
+    private static final String TAG = "MultiPreferences";
+    private static final String PREF_NAME = "vcamera_prefs";
 
-    private MultiPreferences() {
-        prefs = App.getContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    private MultiPreferences(Context context) {
+        if (context != null) {
+            prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+        }
     }
 
-    public static MultiPreferences getInstance() {
+    public static synchronized MultiPreferences getInstance() {
         if (instance == null) {
-            instance = new MultiPreferences();
+            try {
+                Context ctx = virtual.camera.app.app.App.getContext();
+                instance = new MultiPreferences(ctx);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to init", e);
+                instance = new MultiPreferences(null);
+            }
         }
         return instance;
     }
 
-    public int getInt(String key, int defaultValue) {
-        return prefs.getInt(key, defaultValue);
+    public boolean getBoolean(String key, boolean defValue) {
+        if (prefs == null) return defValue;
+        try { return prefs.getBoolean(key, defValue); } catch (Exception e) { return defValue; }
     }
 
-    public void setInt(String key, int value) {
-        prefs.edit().putInt(key, value).apply();
+    public String getString(String key, String defValue) {
+        if (prefs == null) return defValue;
+        try { return prefs.getString(key, defValue); } catch (Exception e) { return defValue; }
     }
 
-    public String getString(String key, String defaultValue) {
-        return prefs.getString(key, defaultValue);
+    public int getInt(String key, int defValue) {
+        if (prefs == null) return defValue;
+        try { return prefs.getInt(key, defValue); } catch (Exception e) { return defValue; }
     }
 
-    public void setString(String key, String value) {
-        prefs.edit().putString(key, value).apply();
+    public void putBoolean(String key, boolean value) {
+        if (prefs == null) return;
+        try { prefs.edit().putBoolean(key, value).apply(); } catch (Exception e) {}
     }
 
-    public boolean getBoolean(String key, boolean defaultValue) {
-        return prefs.getBoolean(key, defaultValue);
+    public void putString(String key, String value) {
+        if (prefs == null) return;
+        try { prefs.edit().putString(key, value).apply(); } catch (Exception e) {}
     }
 
-    public void setBoolean(String key, boolean value) {
-        prefs.edit().putBoolean(key, value).apply();
-    }
-
-    public float getFloat(String key, float defaultValue) {
-        return prefs.getFloat(key, defaultValue);
-    }
-
-    public void setFloat(String key, float value) {
-        prefs.edit().putFloat(key, value).apply();
-    }
-
-    public long getLong(String key, long defaultValue) {
-        return prefs.getLong(key, defaultValue);
-    }
-
-    public void setLong(String key, long value) {
-        prefs.edit().putLong(key, value).apply();
+    public void putInt(String key, int value) {
+        if (prefs == null) return;
+        try { prefs.edit().putInt(key, value).apply(); } catch (Exception e) {}
     }
 }
