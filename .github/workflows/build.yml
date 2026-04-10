@@ -75,6 +75,7 @@ jobs:
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
 
+          # Copy mipmap icons
           for dir in apk_decoded/res/mipmap-*; do
             if [ -d "$dir" ]; then
               density=$(basename "$dir")
@@ -83,12 +84,44 @@ jobs:
             fi
           done
 
-          if [ ! -d "app/src/main/res/mipmap-hdpi" ]; then
+          # Remove duplicate resource files (keep only one format per resource name)
+          echo "=== Checking for duplicate resources ==="
+          for dir in app/src/main/res/mipmap-*; do
+            if [ -d "$dir" ]; then
+              # For each base name, keep only one file (prefer png over jpg)
+              for png in "$dir"/*.png; do
+                base=$(basename "$png" .png)
+                if [ -f "$dir/$base.jpg" ]; then
+                  echo "Removing duplicate: $dir/$base.jpg (keeping .png)"
+                  rm "$dir/$base.jpg"
+                fi
+              done
+              # For each base name, also check webp
+              for webp in "$dir"/*.webp; do
+                base=$(basename "$webp" .webp)
+                if [ -f "$dir/$base.png" ]; then
+                  echo "Removing duplicate: $dir/$base.png (keeping .webp)"
+                  rm "$dir/$base.png"
+                fi
+                if [ -f "$dir/$base.jpg" ]; then
+                  echo "Removing duplicate: $dir/$base.jpg (keeping .webp)"
+                  rm "$dir/$base.jpg"
+                fi
+              done
+            fi
+          done
+
+          # If no mipmap resources exist at all, create placeholders
+          if ! ls app/src/main/res/mipmap-*/ic_launcher.* 1>/dev/null 2>&1; then
+            echo "Creating placeholder launcher icons..."
             for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
               mkdir -p "app/src/main/res/mipmap-$density"
               echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > "app/src/main/res/mipmap-$density/ic_launcher.png"
             done
           fi
+
+          echo "=== Final mipmap resources ==="
+          find app/src/main/res/mipmap-* -type f 2>/dev/null
 
       - name: Update settings.gradle
         run: |
@@ -191,12 +224,11 @@ jobs:
 
       - name: Find and upload APK
         run: |
-          echo "=== Searching for APK files ==="
+          echo "=== All APK files ==="
           find app/build -name "*.apk" 2>/dev/null
-          # Copy APK to known location
           mkdir -p output
           find app/build -name "*.apk" -exec cp {} output/ \;
-          ls -lh output/ 2>/dev/null || echo "No APK found"
+          ls -lh output/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
