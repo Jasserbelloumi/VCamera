@@ -39,50 +39,35 @@ jobs:
 
           unzip -q "$APK_FILE" -d apk_contents
 
-          # Convert ALL dex files
           mkdir -p /tmp/merged_classes
           for dex in apk_contents/classes*.dex; do
             echo "Converting: $dex"
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
 
-          # Merge all jars
           for jar in /tmp/tmp_*.jar; do
             if [ -f "$jar" ]; then
               cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
             fi
           done
 
-          # Remove ALL packages that are available via Maven/Gradle dependencies
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
           rm -rf okhttp3/ okio/ 2>/dev/null || true
           rm -rf org/osmdroid/ org/metalev/ 2>/dev/null || true
           rm -rf com/tbuonomo/ 2>/dev/null || true
-          rm -rf com/airbnb/ 2>/dev/null || true
-          rm -rf com/bumptech/ 2>/dev/null || true
-          rm -rf com/squareup/ 2>/dev/null || true
-          rm -rf retrofit2/ 2>/dev/null || true
-          rm -rf io/reactivex/ 2>/dev/null || true
-          rm -rf org/reactivestreams/ 2>/dev/null || true
+          rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
 
-          echo "=== Remaining non-standard packages ==="
-          find /tmp/merged_classes -maxdepth 3 -type d | head -40
-
-          # Create cleaned jar with ONLY non-standard deps
           cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
           echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
 
-          # Copy native .so libs
           if [ -d "apk_contents/lib" ]; then
             for abi_dir in apk_contents/lib/*/; do
               abi=$(basename "$abi_dir")
               mkdir -p "app/src/main/jniLibs/$abi"
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
-            echo "=== Native libs ==="
-            find app/src/main/jniLibs -name "*.so"
           fi
 
       - name: Extract resources from APK
@@ -90,7 +75,6 @@ jobs:
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
 
-          # Copy mipmap icons from decoded APK
           for dir in apk_decoded/res/mipmap-*; do
             if [ -d "$dir" ]; then
               density=$(basename "$dir")
@@ -99,18 +83,12 @@ jobs:
             fi
           done
 
-          # If no mipmap dirs found, create placeholder icons
           if [ ! -d "app/src/main/res/mipmap-hdpi" ]; then
-            echo "Creating placeholder launcher icons..."
             for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
               mkdir -p "app/src/main/res/mipmap-$density"
-              # Create a simple PNG (1x1 green pixel as base64)
               echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > "app/src/main/res/mipmap-$density/ic_launcher.png"
             done
           fi
-
-          echo "=== Mipmap resources ==="
-          find app/src/main/res/mipmap-* -type f 2>/dev/null | head -20
 
       - name: Update settings.gradle
         run: |
@@ -179,10 +157,7 @@ jobs:
           }
 
           dependencies {
-              // Non-standard deps from APK (opensdk, camera, stateview, catloading, floatingview, etc.)
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
-
-              // Standard Android deps from Maven
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -212,11 +187,21 @@ jobs:
           chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace 2>&1 | tail -80
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Find and upload APK
+        run: |
+          echo "=== Searching for APK files ==="
+          find app/build -name "*.apk" 2>/dev/null
+          # Copy APK to known location
+          mkdir -p output
+          find app/build -name "*.apk" -exec cp {} output/ \;
+          ls -lh output/ 2>/dev/null || echo "No APK found"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: output/
           retention-days: 30
+          if-no-files-found: warn
