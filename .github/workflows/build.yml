@@ -36,8 +36,6 @@ jobs:
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
-          echo "=== Decoded APK structure ==="
-          ls apk_decoded/res/values/ | head -20
 
       - name: Extract deps from APK
         run: |
@@ -46,26 +44,44 @@ jobs:
 
           unzip -q "$APK_FILE" -d apk_contents
 
+          # Check how many dex files
+          echo "=== DEX files ==="
+          ls -lh apk_contents/classes*.dex
+
           mkdir -p /tmp/merged_classes
           for dex in apk_contents/classes*.dex; do
-            echo "Converting: $dex"
-            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
+            OUT="/tmp/tmp_$(basename $dex .dex).jar"
+            echo "Converting: $dex -> $OUT"
+            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o "$OUT" --force 2>&1 | tail -3
           done
 
+          echo "=== Converted jars ==="
+          ls -lh /tmp/tmp_*.jar 2>/dev/null
+
+          # Merge all jars
           for jar in /tmp/tmp_*.jar; do
             if [ -f "$jar" ]; then
               cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
             fi
           done
 
+          # Check if virtual.camera.camera is present BEFORE cleaning
+          echo "=== virtual.camera.camera packages (before cleaning) ==="
+          find /tmp/merged_classes/virtual -type d 2>/dev/null | head -10
+
+          # Remove ONLY standard library packages (keep virtual.*, com.othershe.*, com.ferfalk.*, etc.)
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
           rm -rf okhttp3/ okio/ org/osmdroid/ org/metalev/ com/tbuonomo/ 2>/dev/null || true
           rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
 
+          # Check after cleaning
+          echo "=== Remaining packages (after cleaning) ==="
+          find /tmp/merged_classes -maxdepth 3 -type d | head -30
+
           cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
-          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print \$5}')"
+          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
 
           if [ -d "apk_contents/lib" ]; then
             for abi_dir in apk_contents/lib/*/; do
@@ -86,21 +102,19 @@ jobs:
             fi
           done
 
-          # Remove duplicate mipmap files
+          # Remove duplicate mipmap files (keep webp > png > jpg)
           for dir in app/src/main/res/mipmap-*; do
-            if [ -d "$dir" ]; then
-              for png in "$dir"/*.png; do
-                [ -f "$png" ] || continue
-                base=$(basename "$png" .png)
-                [ -f "$dir/$base.jpg" ] && rm "$dir/$base.jpg"
-              done
-              for webp in "$dir"/*.webp; do
-                [ -f "$webp" ] || continue
-                base=$(basename "$webp" .webp)
-                [ -f "$dir/$base.png" ] && rm "$dir/$base.png"
-                [ -f "$dir/$base.jpg" ] && rm "$dir/$base.jpg"
-              done
-            fi
+            [ -d "$dir" ] || continue
+            for webp in "$dir"/*.webp; do
+              [ -f "$webp" ] || continue
+              base=$(basename "$webp" .webp)
+              rm -f "$dir/$base.png" "$dir/$base.jpg"
+            done
+            for png in "$dir"/*.png; do
+              [ -f "$png" ] || continue
+              base=$(basename "$png" .png)
+              rm -f "$dir/$base.jpg"
+            done
           done
 
           # Placeholder if no icons exist
@@ -115,7 +129,6 @@ jobs:
           cat > app/src/main/res/values/lib_attrs.xml << 'ATTRS'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <!-- CornerLabelView attrs -->
               <declare-styleable name="CornerLabelView">
                   <attr name="position" format="enum">
                       <enum name="left_top" value="0"/>
@@ -129,8 +142,6 @@ jobs:
                   <attr name="bg_color" format="color"/>
                   <attr name="side_length" format="dimension"/>
               </declare-styleable>
-
-              <!-- SimpleSearchView attrs -->
               <declare-styleable name="SimpleSearchView">
                   <attr name="type" format="enum">
                       <enum name="normal" value="0"/>
@@ -139,9 +150,8 @@ jobs:
               </declare-styleable>
           </resources>
           ATTRS
-          echo "lib_attrs.xml created"
 
-          echo "=== Mipmap files ==="
+          echo "=== Final mipmap resources ==="
           find app/src/main/res/mipmap-* -type f 2>/dev/null | head -10
 
       - name: Update settings.gradle
@@ -171,21 +181,12 @@ jobs:
               }
 
               buildTypes {
-                  debug {
-                      minifyEnabled false
-                  }
-                  release {
-                      minifyEnabled false
-                  }
+                  debug { minifyEnabled false }
+                  release { minifyEnabled false }
               }
 
-              buildFeatures {
-                  viewBinding true
-              }
-
-              kotlinOptions {
-                  jvmTarget = '1.8'
-              }
+              buildFeatures { viewBinding true }
+              kotlinOptions { jvmTarget = '1.8' }
 
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
@@ -241,17 +242,19 @@ jobs:
           chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace 2>&1 | grep -v "^at " | tail -50
 
       - name: Find and upload APK
+        if: always()
         run: |
-          echo "=== All APK files ==="
-          find app/build -name "*.apk" 2>/dev/null
+          echo "=== Searching for APK ==="
+          find . -name "*.apk" 2>/dev/null
           mkdir -p output
-          find app/build -name "*.apk" -exec cp {} output/ \\;
-          ls -lh output/
+          find . -name "*.apk" ! -path "./Virtual*" -exec cp {} output/ \;
+          ls -lh output/ 2>/dev/null || echo "No APK found"
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
