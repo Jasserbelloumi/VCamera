@@ -6,9 +6,11 @@ on:
     branches: [ main ]
 
 jobs:
-  decompile-and-build:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      apk-path: ${{ steps.find-apk.outputs.apk-path }}
 
     steps:
       - name: Checkout code
@@ -41,48 +43,21 @@ jobs:
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           mkdir -p apk_contents app/libs app/src/main/jniLibs
-
           unzip -q "$APK_FILE" -d apk_contents
-
-          # Check how many dex files
-          echo "=== DEX files ==="
-          ls -lh apk_contents/classes*.dex
-
           mkdir -p /tmp/merged_classes
           for dex in apk_contents/classes*.dex; do
-            OUT="/tmp/tmp_$(basename $dex .dex).jar"
-            echo "Converting: $dex -> $OUT"
-            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o "$OUT" --force 2>&1 | tail -3
+            ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
-
-          echo "=== Converted jars ==="
-          ls -lh /tmp/tmp_*.jar 2>/dev/null
-
-          # Merge all jars
           for jar in /tmp/tmp_*.jar; do
-            if [ -f "$jar" ]; then
-              cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
-            fi
+            [ -f "$jar" ] && cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
           done
-
-          # Check if virtual.camera.camera is present BEFORE cleaning
-          echo "=== virtual.camera.camera packages (before cleaning) ==="
-          find /tmp/merged_classes/virtual -type d 2>/dev/null | head -10
-
-          # Remove ONLY standard library packages (keep virtual.*, com.othershe.*, com.ferfalk.*, etc.)
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
           rm -rf okhttp3/ okio/ org/osmdroid/ org/metalev/ com/tbuonomo/ 2>/dev/null || true
           rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
-
-          # Check after cleaning
-          echo "=== Remaining packages (after cleaning) ==="
-          find /tmp/merged_classes -maxdepth 3 -type d | head -30
-
           cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
-          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
-
+          echo "JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
           if [ -d "apk_contents/lib" ]; then
             for abi_dir in apk_contents/lib/*/; do
               abi=$(basename "$abi_dir")
@@ -91,41 +66,31 @@ jobs:
             done
           fi
 
-      - name: Extract and merge resources from APK
+      - name: Extract resources from APK
         run: |
-          # Copy mipmap icons from decoded APK
           for dir in apk_decoded/res/mipmap-*; do
-            if [ -d "$dir" ]; then
-              density=$(basename "$dir")
-              mkdir -p "app/src/main/res/$density"
-              cp "$dir"/* "app/src/main/res/$density/" 2>/dev/null || true
-            fi
+            [ -d "$dir" ] || continue
+            density=$(basename "$dir")
+            mkdir -p "app/src/main/res/$density"
+            cp "$dir"/* "app/src/main/res/$density/" 2>/dev/null || true
           done
-
-          # Remove duplicate mipmap files (keep webp > png > jpg)
           for dir in app/src/main/res/mipmap-*; do
             [ -d "$dir" ] || continue
             for webp in "$dir"/*.webp; do
-              [ -f "$webp" ] || continue
-              base=$(basename "$webp" .webp)
+              [ -f "$webp" ] || continue; base=$(basename "$webp" .webp)
               rm -f "$dir/$base.png" "$dir/$base.jpg"
             done
             for png in "$dir"/*.png; do
-              [ -f "$png" ] || continue
-              base=$(basename "$png" .png)
+              [ -f "$png" ] || continue; base=$(basename "$png" .png)
               rm -f "$dir/$base.jpg"
             done
           done
-
-          # Placeholder if no icons exist
           if ! ls app/src/main/res/mipmap-*/ic_launcher.* 1>/dev/null 2>&1; then
             for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
               mkdir -p "app/src/main/res/mipmap-$density"
               echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > "app/src/main/res/mipmap-$density/ic_launcher.png"
             done
           fi
-
-          # Create attrs.xml for custom view libraries
           cat > app/src/main/res/values/lib_attrs.xml << 'ATTRS'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -151,15 +116,8 @@ jobs:
           </resources>
           ATTRS
 
-          echo "=== Final mipmap resources ==="
-          find app/src/main/res/mipmap-* -type f 2>/dev/null | head -10
-
       - name: Update settings.gradle
-        run: |
-          cat > settings.gradle << 'GRADLE'
-          include ':app'
-          rootProject.name = "VCamera"
-          GRADLE
+        run: printf 'include ":app"\nrootProject.name = "VCamera"\n' > settings.gradle
 
       - name: Update app/build.gradle
         run: |
@@ -168,10 +126,8 @@ jobs:
               id 'com.android.application'
               id 'kotlin-android'
           }
-
           android {
               compileSdk rootProject.ext.compileSdkVersion
-
               defaultConfig {
                   applicationId rootProject.ext.masterPkg
                   minSdkVersion rootProject.ext.minSdkVersion
@@ -179,38 +135,28 @@ jobs:
                   versionCode rootProject.ext.versionCode
                   versionName rootProject.ext.versionName
               }
-
               buildTypes {
                   debug { minifyEnabled false }
                   release { minifyEnabled false }
               }
-
               buildFeatures { viewBinding true }
               kotlinOptions { jvmTarget = '1.8' }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
                   targetCompatibility JavaVersion.VERSION_1_8
               }
-
-              lintOptions {
-                  checkReleaseBuilds false
-                  abortOnError false
-              }
-
+              lintOptions { checkReleaseBuilds false; abortOnError false }
               packagingOptions {
                   pickFirst 'META-INF/**'
                   pickFirst 'kotlin/**'
               }
           }
-
           repositories {
               flatDir { dirs 'libs' }
               google()
               mavenCentral()
               maven { url 'https://jitpack.io' }
           }
-
           dependencies {
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
               implementation 'com.google.android.material:material:1.3.0'
@@ -237,22 +183,19 @@ jobs:
           gradle-version: '7.2'
 
       - name: Create gradlew
-        run: |
-          gradle wrapper --gradle-version=7.2
-          chmod +x gradlew
+        run: gradle wrapper --gradle-version=7.2 && chmod +x gradlew
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Find built APK
+      - name: Find APK
+        id: find-apk
         run: |
-          echo "=== Searching all APK files ==="
-          find . -name "*.apk" 2>/dev/null
           mkdir -p output
-          # Copy only built APKs (not the original source APK)
           find ./app -name "*.apk" -exec cp {} output/ \;
-          echo "=== Output folder ==="
-          ls -lh output/ 2>/dev/null || echo "No APK in output/"
+          APK=$(find output -name "*.apk" | head -1)
+          echo "apk-path=$APK" >> $GITHUB_OUTPUT
+          ls -lh output/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -260,4 +203,52 @@ jobs:
           name: VCamera-debug-apk
           path: output/
           retention-days: 30
-          if-no-files-found: warn
+
+  test-on-emulator:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: VCamera-debug-apk
+          path: output/
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Android SDK emulator
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "emulator" "system-images;android-30;google_apis;x86_64" "platforms;android-30" || true
+
+      - name: Create AVD
+        run: |
+          echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n test -k "system-images;android-30;google_apis;x86_64" --force || true
+
+      - name: Start emulator and test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          profile: Nexus 6
+          script: |
+            APK=$(find output -name "*.apk" | head -1)
+            echo "=== Installing: $APK ==="
+            adb install -r "$APK"
+            sleep 3
+            echo "=== Starting app ==="
+            adb shell am start -n virtual.camera.app/virtual.camera.app.view.main.WelcomeActivity
+            sleep 8
+            echo "=== CRASH LOG ==="
+            adb logcat -d | grep -E "AndroidRuntime|FATAL|virtual.camera" | head -40
+            echo "=== RUNNING PROCESSES ==="
+            adb shell ps | grep virtual.camera || echo "App not running (crashed)"
