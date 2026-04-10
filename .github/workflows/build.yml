@@ -25,88 +25,73 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;31.0.0" "platforms;android-33" || true
 
-      - name: Install tools (dex2jar + apktool)
+      - name: Install dex2jar
         run: |
           wget -q https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
           unzip -q dex-tools-v2.4.zip
           chmod +x dex-tools-v2.4/d2j-dex2jar.sh
 
-          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
-          echo '#!/bin/bash' > apktool && echo 'java -jar '"$PWD/apktool.jar"' "$@"' >> apktool
-          chmod +x apktool && echo "$PWD" >> $GITHUB_PATH
-
-      - name: Decompile APK with apktool (resources)
+      - name: Extract deps from APK and clean duplicates
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          apktool d "$APK_FILE" -o apk_decoded --force-all 2>&1 | tail -5
+          mkdir -p apk_contents app/libs app/src/main/jniLibs
 
-      - name: Extract classes from APK with dex2jar
-        run: |
-          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          mkdir -p app/libs app/src/main/jniLibs
+          # Extract APK
+          unzip -q "$APK_FILE" -d apk_contents
 
-          mkdir -p apk_raw
-          unzip -q "$APK_FILE" -d apk_raw
+          # Convert ALL dex files
           mkdir -p /tmp/merged_classes
-
-          for dex in apk_raw/classes*.dex; do
+          for dex in apk_contents/classes*.dex; do
             echo "Converting: $dex"
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
           done
 
+          # Merge all jars
           for jar in /tmp/tmp_*.jar; do
-            [ -f "$jar" ] && cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
+            if [ -f "$jar" ]; then
+              cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
+            fi
           done
 
+          # Remove standard library packages to avoid duplicates
+          # Keep ONLY non-standard packages (opensdk, camera, stateview, catloading, floatingview, osmdroid, etc.)
           cd /tmp/merged_classes
-
-          # Remove Maven/JitPack-resolvable packages to avoid duplicate classes
-          rm -rf android/ androidx/ com/google/ META-INF/
-          rm -rf kotlin/ kotlinx/ org/intellij/ org/jetbrains/
-          rm -rf com/tbuonomo/ org/osmdroid/ org/metalev/
-          rm -rf com/afollestad/ com/othershe/ com/Othershe/
-          rm -rf com/github/ferfalk/ com/github/Ferfalk/
-
-          # KEEP: me/nukc (stateview - JitPack can't resolve v2.2.0)
-          # KEEP: cbfg/ (RVAdapter - gitee maven), com/roger/, com/imuxuan/
-          # KEEP: virtual/ (app code + camera lib), com/android/ (billing)
-
-          echo "=== Remaining packages in jar ==="
-          find . -name "*.class" | sed 's|./||' | awk -F/ '{print $1"/"$2}' | sort -u
-
-          MERGED_JAR="$OLDPWD/app/libs/all-deps.jar"
-          jar cf "$MERGED_JAR" . 2>/dev/null || true
+          rm -rf androidx/ 2>/dev/null || true
+          rm -rf android/ 2>/dev/null || true
+          rm -rf com/google/ 2>/dev/null || true
+          rm -rf kotlin/ 2>/dev/null || true
+          rm -rf kotlinx/ 2>/dev/null || true
+          rm -rf org/jetbrains/ 2>/dev/null || true
+          rm -rf org/intellij/ 2>/dev/null || true
+          rm -rf META-INF/ 2>/dev/null || true
+          rm -rf okhttp3/ 2>/dev/null || true
+          rm -rf okio/ 2>/dev/null || true
           cd -
-          echo "JAR size: $(ls -lh app/libs/all-deps.jar | awk '{print $5}')"
 
-          # Copy native .so libraries
-          if [ -d "apk_raw/lib" ]; then
-            for abi_dir in apk_raw/lib/*/; do
+          echo "=== Remaining packages (non-standard) ==="
+          find /tmp/merged_classes -maxdepth 2 -type d | head -30
+
+          # Create cleaned jar
+          cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
+          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
+
+          # Copy native .so libs
+          if [ -d "apk_contents/lib" ]; then
+            for abi_dir in apk_contents/lib/*/; do
               abi=$(basename "$abi_dir")
               mkdir -p "app/src/main/jniLibs/$abi"
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
+            echo "=== Native libs ==="
             find app/src/main/jniLibs -name "*.so"
           fi
 
-      - name: Copy mipmap icons from decoded APK
-        run: |
-          for mipmap_dir in apk_decoded/res/mipmap-*/; do
-            if [ -d "$mipmap_dir" ]; then
-              dir_name=$(basename "$mipmap_dir")
-              mkdir -p "app/src/main/res/$dir_name"
-              cp "$mipmap_dir"* "app/src/main/res/$dir_name/" 2>/dev/null || true
-            fi
-          done
-          echo "Mipmaps: $(ls app/src/main/res/ | grep mipmap | tr '\n' ' ')"
-
-          if [ -d "apk_decoded/assets" ]; then
-            mkdir -p app/src/main/assets
-            cp -rn apk_decoded/assets/. app/src/main/assets/ 2>/dev/null || true
-          fi
-
       - name: Update settings.gradle
-        run: echo "include ':app'; rootProject.name = 'VCamera'" > settings.gradle
+        run: |
+          cat > settings.gradle << 'GRADLE'
+          include ':app'
+          rootProject.name = "VCamera"
+          GRADLE
 
       - name: Update app/build.gradle
         run: |
@@ -128,25 +113,35 @@ jobs:
               }
 
               buildTypes {
-                  debug { minifyEnabled false }
-                  release { minifyEnabled false }
+                  debug {
+                      minifyEnabled false
+                  }
+                  release {
+                      minifyEnabled false
+                  }
               }
 
-              buildFeatures { viewBinding true }
-              kotlinOptions { jvmTarget = '1.8' }
+              buildFeatures {
+                  viewBinding true
+              }
+
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
                   targetCompatibility JavaVersion.VERSION_1_8
               }
+
               lintOptions {
                   checkReleaseBuilds false
                   abortOnError false
-                  disable 'UnusedResources', 'RestrictedApi'
               }
+
               packagingOptions {
                   pickFirst 'META-INF/**'
                   pickFirst 'kotlin/**'
-                  pickFirst '**/*.so'
               }
           }
 
@@ -155,14 +150,13 @@ jobs:
               google()
               mavenCentral()
               maven { url 'https://jitpack.io' }
-              maven { url "https://raw.githubusercontent.com/andvipgroup/CameraLib/master" }
           }
 
           dependencies {
-              // Proprietary + JCenter-dead + unresolvable via Maven (from APK DEX)
+              // Non-standard deps extracted from APK
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 
-              // Google Maven
+              // Standard Android deps
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -176,19 +170,10 @@ jobs:
               implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
               implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
-
-              // MavenCentral
               implementation 'com.tbuonomo:dotsindicator:4.2'
               implementation 'org.osmdroid:osmdroid-android:6.1.11'
-
-              // JitPack (provide classes + attrs.xml via AAR)
-              implementation 'com.afollestad.material-dialogs:core:3.3.0'
-              implementation 'com.afollestad.material-dialogs:input:3.3.0'
-              implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
-              implementation 'com.github.Othershe:CornerLabelView:1.0.0'
           }
           GRADLE
-          echo "app/build.gradle updated"
 
       - name: Setup Gradle wrapper
         uses: gradle/actions/setup-gradle@v3
@@ -204,17 +189,8 @@ jobs:
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: app/build/outputs/logs/
-          retention-days: 7
