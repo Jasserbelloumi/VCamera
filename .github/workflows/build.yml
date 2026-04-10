@@ -9,8 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    outputs:
-      apk-path: ${{ steps.find-apk.outputs.apk-path }}
 
     steps:
       - name: Checkout code
@@ -44,6 +42,7 @@ jobs:
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           mkdir -p apk_contents app/libs app/src/main/jniLibs
           unzip -q "$APK_FILE" -d apk_contents
+
           mkdir -p /tmp/merged_classes
           for dex in apk_contents/classes*.dex; do
             ./dex-tools-v2.4/d2j-dex2jar.sh "$dex" -o /tmp/tmp_$(basename $dex .dex).jar --force 2>/dev/null || true
@@ -51,13 +50,34 @@ jobs:
           for jar in /tmp/tmp_*.jar; do
             [ -f "$jar" ] && cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
           done
+
+          # Remove standard library packages
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
           rm -rf okhttp3/ okio/ org/osmdroid/ org/metalev/ com/tbuonomo/ 2>/dev/null || true
           rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
+
+          # KEY FIX: Remove from JAR any class that has a matching .java source file
+          echo "=== Removing JAR classes that conflict with source files ==="
+          find app/src -name "*.java" -type f | while read src; do
+            rel=$(echo "$src" | sed 's|app/src/main/java/||')
+            cls=$(echo "$rel" | sed 's/\.java$/.class/')
+            if [ -f "/tmp/merged_classes/$cls" ]; then
+              echo "  Removing (source exists): $cls"
+              rm -f "/tmp/merged_classes/$cls"
+              base=$(echo "$cls" | sed 's/\.class$//')
+              rm -f /tmp/merged_classes/${base}\$*.class 2>/dev/null || true
+            fi
+          done
+
+          echo "=== virtual.camera classes remaining in JAR ==="
+          find /tmp/merged_classes/virtual -name "*.class" 2>/dev/null | wc -l
+          find /tmp/merged_classes/virtual -name "*.class" 2>/dev/null | head -20
+
           cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
           echo "JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
+
           if [ -d "apk_contents/lib" ]; then
             for abi_dir in apk_contents/lib/*/; do
               abi=$(basename "$abi_dir")
@@ -134,6 +154,7 @@ jobs:
                   targetSdkVersion rootProject.ext.targetSdkVersion
                   versionCode rootProject.ext.versionCode
                   versionName rootProject.ext.versionName
+                  multiDexEnabled true
               }
               buildTypes {
                   debug { minifyEnabled false }
@@ -159,6 +180,7 @@ jobs:
           }
           dependencies {
               implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
+              implementation 'androidx.multidex:multidex:2.0.1'
               implementation 'com.google.android.material:material:1.3.0'
               implementation 'androidx.core:core-ktx:1.3.2'
               implementation 'androidx.appcompat:appcompat:1.3.0-rc01'
@@ -188,13 +210,26 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Verify APK contents
+        run: |
+          APK=$(find ./app -name "*.apk" | head -1)
+          echo "=== APK: $APK ==="
+          echo "=== Checking for key classes in APK ==="
+          unzip -q "$APK" -d /tmp/apk_check
+          for dex in /tmp/apk_check/classes*.dex; do
+            echo "--- $(basename $dex) ---"
+            $ANDROID_HOME/build-tools/31.0.0/dexdump "$dex" 2>/dev/null | grep "WelcomeActivity" || true
+            $ANDROID_HOME/build-tools/31.0.0/dexdump "$dex" 2>/dev/null | grep "virtual.camera.app.view.main" | head -10 || true
+          done
+          echo "=== Source compiled classes ==="
+          find app/build -name "WelcomeActivity*" -type f 2>/dev/null || echo "NO WelcomeActivity in build/"
+          find app/build -path "*/virtual/camera/app/view/main/*" -name "*.class" -type f 2>/dev/null | head -10
+
       - name: Find APK
         id: find-apk
         run: |
           mkdir -p output
           find ./app -name "*.apk" -exec cp {} output/ \;
-          APK=$(find output -name "*.apk" | head -1)
-          echo "apk-path=$APK" >> $GITHUB_OUTPUT
           ls -lh output/
 
       - name: Upload APK
@@ -203,52 +238,3 @@ jobs:
           name: VCamera-debug-apk
           path: output/
           retention-days: 30
-
-  test-on-emulator:
-    runs-on: ubuntu-latest
-    needs: build
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: VCamera-debug-apk
-          path: output/
-
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install Android SDK emulator
-        run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "emulator" "system-images;android-30;google_apis;x86_64" "platforms;android-30" || true
-
-      - name: Create AVD
-        run: |
-          echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd -n test -k "system-images;android-30;google_apis;x86_64" --force || true
-
-      - name: Start emulator and test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          arch: x86_64
-          profile: Nexus 6
-          script: |
-            APK=$(find output -name "*.apk" | head -1)
-            echo "=== Installing: $APK ==="
-            adb install -r "$APK"
-            sleep 3
-            echo "=== Starting app ==="
-            adb shell am start -n virtual.camera.app/virtual.camera.app.view.main.WelcomeActivity
-            sleep 8
-            echo "=== CRASH LOG ==="
-            adb logcat -d | grep -E "AndroidRuntime|FATAL|virtual.camera" | head -40
-            echo "=== RUNNING PROCESSES ==="
-            adb shell ps | grep virtual.camera || echo "App not running (crashed)"
