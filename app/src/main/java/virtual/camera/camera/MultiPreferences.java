@@ -44,18 +44,42 @@ public class MultiPreferences {
         try { return prefs.getInt(key, defValue); } catch (Exception e) { return defValue; }
     }
 
-    public void putBoolean(String key, boolean value) {
+    public long getLong(String key, long defValue) {
+        if (prefs == null) return defValue;
+        try { return prefs.getLong(key, defValue); } catch (Exception e) { return defValue; }
+    }
+
+    public float getFloat(String key, float defValue) {
+        if (prefs == null) return defValue;
+        try { return prefs.getFloat(key, defValue); } catch (Exception e) { return defValue; }
+    }
+
+    public void setBoolean(String key, boolean value) {
         if (prefs == null) return;
         try { prefs.edit().putBoolean(key, value).apply(); } catch (Exception e) {}
     }
 
-    public void putString(String key, String value) {
+    public void setString(String key, String value) {
         if (prefs == null) return;
         try { prefs.edit().putString(key, value).apply(); } catch (Exception e) {}
     }
 
-    public void putInt(String key, int value) {
+    public void setInt(String key, int value) {
         if (prefs == null) return;
         try { prefs.edit().putInt(key, value).apply(); } catch (Exception e) {}
     }
+
+    public void setLong(String key, long value) {
+        if (prefs == null) return;
+        try { prefs.edit().putLong(key, value).apply(); } catch (Exception e) {}
+    }
+
+    public void setFloat(String key, float value) {
+        if (prefs == null) return;
+        try { prefs.edit().putFloat(key, value).apply(); } catch (Exception e) {}
+    }
+
+    public void putBoolean(String key, boolean value) { setBoolean(key, value); }
+    public void putString(String key, String value) { setString(key, value); }
+    public void putInt(String key, int value) { setInt(key, value); }
 }
