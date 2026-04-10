@@ -257,7 +257,7 @@ jobs:
         run: gradle wrapper --gradle-version=7.2 && chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace 2>&1 | tail -50
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         run: |
