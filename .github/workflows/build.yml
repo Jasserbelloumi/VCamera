@@ -37,11 +37,11 @@ jobs:
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
           apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
 
-      - name: Copy ALL resources from decoded APK
+      - name: Copy resources from decoded APK
         run: |
-          echo "=== Copying ALL decoded resources to app ==="
-          # Copy ALL res/ directories from decoded APK (drawables, xml, values, layouts, etc.)
-          # But prioritize source files over decoded ones
+          echo "=== Copying decoded resources (filtered) ==="
+          SKIPPED=0
+          COPIED=0
           for dir in apk_decoded/res/*/; do
             [ -d "$dir" ] || continue
             restype=$(basename "$dir")
@@ -49,15 +49,22 @@ jobs:
             for file in "$dir"*; do
               [ -f "$file" ] || continue
               fname=$(basename "$file")
+              # Skip files with invalid resource name characters ($, uppercase, spaces)
+              if echo "$fname" | grep -qE '[$A-Z ]'; then
+                SKIPPED=$((SKIPPED+1))
+                continue
+              fi
               # Only copy if source doesn't already have this file
               if [ ! -f "app/src/main/res/$restype/$fname" ]; then
                 cp "$file" "app/src/main/res/$restype/$fname"
+                COPIED=$((COPIED+1))
               fi
             done
           done
+          echo "Copied: $COPIED files, Skipped: $SKIPPED invalid files"
 
-          # Fix duplicate mipmap resources (prefer webp > png > jpg)
-          for dir in app/src/main/res/mipmap-*; do
+          # Fix duplicate mipmap/drawable resources (prefer webp > png > jpg)
+          for dir in app/src/main/res/mipmap-* app/src/main/res/drawable*; do
             [ -d "$dir" ] || continue
             for webp in "$dir"/*.webp; do
               [ -f "$webp" ] || continue; base=$(basename "$webp" .webp)
@@ -69,20 +76,7 @@ jobs:
             done
           done
 
-          # Fix duplicate drawable resources
-          for dir in app/src/main/res/drawable*; do
-            [ -d "$dir" ] || continue
-            for webp in "$dir"/*.webp; do
-              [ -f "$webp" ] || continue; base=$(basename "$webp" .webp)
-              rm -f "$dir/$base.png" "$dir/$base.jpg"
-            done
-            for png in "$dir"/*.png; do
-              [ -f "$png" ] || continue; base=$(basename "$png" .png)
-              rm -f "$dir/$base.jpg"
-            done
-          done
-
-          # Ensure ic_launcher exists
+          # Ensure ic_launcher
           if ! ls app/src/main/res/mipmap-*/ic_launcher.* 1>/dev/null 2>&1; then
             for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
               mkdir -p "app/src/main/res/mipmap-$density"
@@ -90,9 +84,10 @@ jobs:
             done
           fi
 
-          # Ensure splash drawable exists (needed by WelcomeTheme)
-          if ! ls app/src/main/res/drawable*/splash.* 1>/dev/null 2>&1; then
+          # Ensure splash drawable
+          if ! find app/src/main/res/drawable* -name "splash.*" 2>/dev/null | head -1 | grep -q .; then
             echo "Creating fallback splash drawable..."
+            mkdir -p app/src/main/res/drawable
             cat > app/src/main/res/drawable/splash.xml << 'SPLASH'
           <?xml version="1.0" encoding="utf-8"?>
           <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
@@ -101,7 +96,7 @@ jobs:
           SPLASH
           fi
 
-          # Ensure network_security_config.xml exists
+          # Ensure network_security_config
           if [ ! -f "app/src/main/res/xml/network_security_config.xml" ]; then
             mkdir -p app/src/main/res/xml
             cat > app/src/main/res/xml/network_security_config.xml << 'NSC'
@@ -116,8 +111,12 @@ jobs:
           NSC
           fi
 
-          # Add custom attrs for library views
-          cat > app/src/main/res/values/lib_attrs.xml << 'ATTRS'
+          # Remove public.xml (causes resource ID conflicts)
+          find app/src/main/res -name "public.xml" -delete 2>/dev/null || true
+
+          # Add custom attrs for library views (if not already in decoded attrs)
+          if ! grep -q "CornerLabelView" app/src/main/res/values/attrs.xml 2>/dev/null; then
+            cat > app/src/main/res/values/lib_attrs.xml << 'ATTRS'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <declare-styleable name="CornerLabelView">
@@ -141,13 +140,12 @@ jobs:
               </declare-styleable>
           </resources>
           ATTRS
+          fi
 
-          # Count resources
-          echo "=== Resource counts ==="
-          for dir in app/src/main/res/*/; do
-            [ -d "$dir" ] || continue
-            echo "  $(basename $dir): $(ls -1 "$dir" 2>/dev/null | wc -l) files"
-          done
+          echo "=== Resource summary ==="
+          echo "Splash: $(find app/src/main/res -name 'splash*' | head -1)"
+          echo "Network config: $(ls app/src/main/res/xml/network_security_config.xml 2>/dev/null)"
+          echo "Themes: $(ls app/src/main/res/values/themes.xml 2>/dev/null)"
 
       - name: Extract deps from APK
         run: |
@@ -163,15 +161,14 @@ jobs:
             [ -f "$jar" ] && cd /tmp/merged_classes && jar xf "$jar" 2>/dev/null || true && cd -
           done
 
-          # Remove standard library packages
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
           rm -rf okhttp3/ okio/ org/osmdroid/ org/metalev/ com/tbuonomo/ 2>/dev/null || true
           rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
 
-          # Remove from JAR any class that has a matching .java source file
-          echo "=== Removing JAR classes that conflict with source files ==="
+          # Remove from JAR classes that have source files
+          echo "=== Removing JAR classes with source equivalents ==="
           find app/src -name "*.java" -type f | while read src; do
             rel=$(echo "$src" | sed 's|app/src/main/java/||')
             cls=$(echo "$rel" | sed 's/\.java$/.class/')
@@ -193,26 +190,6 @@ jobs:
               cp "$abi_dir"*.so "app/src/main/jniLibs/$abi/" 2>/dev/null || true
             done
           fi
-
-      - name: Fix resource conflicts
-        run: |
-          echo "=== Fixing potential resource conflicts ==="
-          # Remove decoded values files that conflict with source values
-          # Keep source values (themes.xml, strings.xml, colors.xml) over decoded ones
-          # But decoded public.xml and other generated files might cause issues
-          rm -f app/src/main/res/values/public.xml 2>/dev/null || true
-          rm -f app/src/main/res/values-*/public.xml 2>/dev/null || true
-          
-          # Remove any attrs that might duplicate our lib_attrs.xml
-          # apktool decoded attrs might conflict
-          if [ -f "app/src/main/res/values/attrs.xml" ]; then
-            # Check if it has CornerLabelView already defined, if so keep lib_attrs only
-            if grep -q "CornerLabelView" app/src/main/res/values/attrs.xml 2>/dev/null; then
-              rm -f app/src/main/res/values/lib_attrs.xml
-            fi
-          fi
-
-          echo "Done fixing resource conflicts"
 
       - name: Update settings.gradle
         run: printf 'include ":app"\nrootProject.name = "VCamera"\n' > settings.gradle
@@ -286,28 +263,22 @@ jobs:
         run: gradle wrapper --gradle-version=7.2 && chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace 2>&1 | tail -50
+        run: ./gradlew assembleDebug --stacktrace 2>&1 | tail -80
 
-      - name: Verify APK contents
+      - name: Verify and upload APK
         run: |
           APK=$(find ./app -name "*.apk" | head -1)
-          echo "=== APK: $APK ==="
-          echo "=== Checking for key classes in APK dex ==="
+          echo "=== APK: $APK ($(ls -lh "$APK" | awk '{print $5}')) ==="
           unzip -q "$APK" -d /tmp/apk_check
           echo "Dex files: $(ls /tmp/apk_check/classes*.dex | wc -l)"
+          echo "=== Key classes in APK ==="
           for dex in /tmp/apk_check/classes*.dex; do
-            echo "--- $(basename $dex) ---"
             $ANDROID_HOME/build-tools/31.0.0/dexdump "$dex" 2>/dev/null | grep "Class descriptor.*Lvirtual/camera" | head -20 || true
           done
-          echo "=== Resources in APK ==="
-          ls /tmp/apk_check/res/ 2>/dev/null | head -20
-          echo "=== Splash drawable check ==="
-          find /tmp/apk_check/res -name "splash*" 2>/dev/null || echo "NO splash found in APK"
-
-      - name: Find APK
-        run: |
+          echo "=== Splash in APK ==="
+          find /tmp/apk_check/res -name "splash*" 2>/dev/null || echo "No splash"
           mkdir -p output
-          find ./app -name "*.apk" -exec cp {} output/ \;
+          cp "$APK" output/
           ls -lh output/
 
       - name: Upload APK
