@@ -32,6 +32,13 @@ jobs:
           chmod +x dex-tools-v2.4/d2j-dex2jar.sh
           sudo apt-get install -y apktool 2>/dev/null || true
 
+      - name: Decode APK resources
+        run: |
+          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
+          apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
+          echo "=== Decoded APK structure ==="
+          ls apk_decoded/res/values/ | head -20
+
       - name: Extract deps from APK
         run: |
           APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
@@ -53,14 +60,12 @@ jobs:
 
           cd /tmp/merged_classes
           rm -rf androidx/ android/ com/google/ kotlin/ kotlinx/ org/jetbrains/ org/intellij/ META-INF/ 2>/dev/null || true
-          rm -rf okhttp3/ okio/ 2>/dev/null || true
-          rm -rf org/osmdroid/ org/metalev/ 2>/dev/null || true
-          rm -rf com/tbuonomo/ 2>/dev/null || true
+          rm -rf okhttp3/ okio/ org/osmdroid/ org/metalev/ com/tbuonomo/ 2>/dev/null || true
           rm -rf com/airbnb/ com/bumptech/ com/squareup/ retrofit2/ io/reactivex/ org/reactivestreams/ 2>/dev/null || true
           cd -
 
           cd /tmp/merged_classes && jar cf "$OLDPWD/app/libs/app-deps.jar" . 2>/dev/null || true && cd -
-          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print $5}')"
+          echo "Cleaned JAR size: $(ls -lh app/libs/app-deps.jar | awk '{print \$5}')"
 
           if [ -d "apk_contents/lib" ]; then
             for abi_dir in apk_contents/lib/*/; do
@@ -70,12 +75,9 @@ jobs:
             done
           fi
 
-      - name: Extract resources from APK
+      - name: Extract and merge resources from APK
         run: |
-          APK_FILE="Virtual_Camera_Live_Assist_V3.5.0 (1).apk"
-          apktool d "$APK_FILE" -o apk_decoded -f 2>/dev/null || true
-
-          # Copy mipmap icons
+          # Copy mipmap icons from decoded APK
           for dir in apk_decoded/res/mipmap-*; do
             if [ -d "$dir" ]; then
               density=$(basename "$dir")
@@ -84,44 +86,63 @@ jobs:
             fi
           done
 
-          # Remove duplicate resource files (keep only one format per resource name)
-          echo "=== Checking for duplicate resources ==="
+          # Remove duplicate mipmap files
           for dir in app/src/main/res/mipmap-*; do
             if [ -d "$dir" ]; then
-              # For each base name, keep only one file (prefer png over jpg)
               for png in "$dir"/*.png; do
+                [ -f "$png" ] || continue
                 base=$(basename "$png" .png)
-                if [ -f "$dir/$base.jpg" ]; then
-                  echo "Removing duplicate: $dir/$base.jpg (keeping .png)"
-                  rm "$dir/$base.jpg"
-                fi
+                [ -f "$dir/$base.jpg" ] && rm "$dir/$base.jpg"
               done
-              # For each base name, also check webp
               for webp in "$dir"/*.webp; do
+                [ -f "$webp" ] || continue
                 base=$(basename "$webp" .webp)
-                if [ -f "$dir/$base.png" ]; then
-                  echo "Removing duplicate: $dir/$base.png (keeping .webp)"
-                  rm "$dir/$base.png"
-                fi
-                if [ -f "$dir/$base.jpg" ]; then
-                  echo "Removing duplicate: $dir/$base.jpg (keeping .webp)"
-                  rm "$dir/$base.jpg"
-                fi
+                [ -f "$dir/$base.png" ] && rm "$dir/$base.png"
+                [ -f "$dir/$base.jpg" ] && rm "$dir/$base.jpg"
               done
             fi
           done
 
-          # If no mipmap resources exist at all, create placeholders
+          # Placeholder if no icons exist
           if ! ls app/src/main/res/mipmap-*/ic_launcher.* 1>/dev/null 2>&1; then
-            echo "Creating placeholder launcher icons..."
             for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
               mkdir -p "app/src/main/res/mipmap-$density"
               echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==" | base64 -d > "app/src/main/res/mipmap-$density/ic_launcher.png"
             done
           fi
 
-          echo "=== Final mipmap resources ==="
-          find app/src/main/res/mipmap-* -type f 2>/dev/null
+          # Create attrs.xml for custom view libraries
+          cat > app/src/main/res/values/lib_attrs.xml << 'ATTRS'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <!-- CornerLabelView attrs -->
+              <declare-styleable name="CornerLabelView">
+                  <attr name="position" format="enum">
+                      <enum name="left_top" value="0"/>
+                      <enum name="right_top" value="1"/>
+                      <enum name="left_bottom" value="2"/>
+                      <enum name="right_bottom" value="3"/>
+                  </attr>
+                  <attr name="text" format="string"/>
+                  <attr name="text_color" format="color"/>
+                  <attr name="text_size" format="dimension"/>
+                  <attr name="bg_color" format="color"/>
+                  <attr name="side_length" format="dimension"/>
+              </declare-styleable>
+
+              <!-- SimpleSearchView attrs -->
+              <declare-styleable name="SimpleSearchView">
+                  <attr name="type" format="enum">
+                      <enum name="normal" value="0"/>
+                      <enum name="card" value="1"/>
+                  </attr>
+              </declare-styleable>
+          </resources>
+          ATTRS
+          echo "lib_attrs.xml created"
+
+          echo "=== Mipmap files ==="
+          find app/src/main/res/mipmap-* -type f 2>/dev/null | head -10
 
       - name: Update settings.gradle
         run: |
@@ -227,7 +248,7 @@ jobs:
           echo "=== All APK files ==="
           find app/build -name "*.apk" 2>/dev/null
           mkdir -p output
-          find app/build -name "*.apk" -exec cp {} output/ \;
+          find app/build -name "*.apk" -exec cp {} output/ \\;
           ls -lh output/
 
       - name: Upload APK
