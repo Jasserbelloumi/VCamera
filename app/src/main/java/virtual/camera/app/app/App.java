@@ -1,24 +1,24 @@
 package virtual.camera.app.app;
 
 import android.app.Application;
-import android.content.Context;
+import android.util.Log;
 
 public class App extends Application {
     private static App instance;
-    private static Context context;
+    private static final String TAG = "App";
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
-        context = getApplicationContext();
+        Log.i(TAG, "App initialized");
     }
 
     public static App getInstance() {
         return instance;
     }
 
-    public static Context getContext() {
-        return context;
+    public static android.content.Context getContext() {
+        return instance != null ? instance.getApplicationContext() : null;
     }
 }
