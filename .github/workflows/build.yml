@@ -242,19 +242,19 @@ jobs:
           chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace 2>&1 | grep -v "^at " | tail -50
+        run: ./gradlew assembleDebug --stacktrace
 
-      - name: Find and upload APK
-        if: always()
+      - name: Find built APK
         run: |
-          echo "=== Searching for APK ==="
+          echo "=== Searching all APK files ==="
           find . -name "*.apk" 2>/dev/null
           mkdir -p output
-          find . -name "*.apk" ! -path "./Virtual*" -exec cp {} output/ \;
-          ls -lh output/ 2>/dev/null || echo "No APK found"
+          # Copy only built APKs (not the original source APK)
+          find ./app -name "*.apk" -exec cp {} output/ \;
+          echo "=== Output folder ==="
+          ls -lh output/ 2>/dev/null || echo "No APK in output/"
 
       - name: Upload APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: VCamera-debug-apk
